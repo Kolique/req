@@ -2,15 +2,16 @@
 """
 Analyse automatique de fichiers Excel de trames LoRaWAN.
 
-Pour chaque fichier :
-  1. Suppression des doublons de DevEUI (on garde la trame la plus récente).
-  2. Classification de chaque capteur selon sa pertinence :
-       - Indispensable   : Redondance = 1 et SF = 7
+Pour chaque fichier (traité séparément) :
+  1. Suppression des trames invalides (SF < 7 n'existe pas en LoRaWAN).
+  2. Suppression des doublons de DevEUI (on garde la trame la plus récente).
+  3. Classification de chaque capteur selon sa pertinence :
+       - Indispensable   : Redondance = 1 (quel que soit le SF)
        - Pertinence ++   : Redondance = 2 et SF dans {7, 8, 9}
        - Pertinence +    : Redondance = 2 et SF > 9
        - Non pertinent   : Redondance > 5
-       - À définir       : tout ce qui ne rentre dans aucune règle ci-dessus
-  3. Export d'un fichier Excel de résultats avec une feuille par catégorie
+       - À définir       : tout ce qui ne rentre dans aucune règle (ex. Redondance 3 à 5)
+  4. Export d'un fichier Excel de résultats avec une feuille par catégorie
      et une feuille de synthèse.
 
 Utilisation :
@@ -35,7 +36,7 @@ def classer(redondance, sf) -> str:
     """Applique les règles de pertinence à une trame."""
     if redondance > 5:
         return "Non pertinent"
-    if redondance == 1 and sf == 7:
+    if redondance == 1:
         return "Indispensable"
     if redondance == 2 and sf in (7, 8, 9):
         return "Pertinence ++"
@@ -54,6 +55,12 @@ def analyser_fichier(chemin: Path) -> pd.DataFrame:
         raise ValueError(f"Colonnes manquantes dans {chemin.name} : {', '.join(sorted(manquantes))}")
 
     nb_avant = len(df)
+
+    # Les trames avec SF < 7 sont invalides (le SF LoRaWAN va de 7 à 12)
+    invalides = df["SF"] < 7
+    if invalides.any():
+        print(f"  {invalides.sum()} trame(s) invalide(s) ignorée(s) (SF < 7)")
+        df = df[~invalides]
 
     # Dédoublonnage : une seule ligne par DevEUI, on garde la trame la plus récente
     if "Heure" in df.columns:
