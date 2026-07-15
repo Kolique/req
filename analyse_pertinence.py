@@ -82,9 +82,7 @@ def analyser_fichier(chemin: Path):
             "Trames lues": len(df)}
 
     # Les trames avec SF < 7 sont invalides (le SF LoRaWAN va de 7 à 12)
-    invalides = df["SF"] < 7
-    meta["Trames invalides ignorées (SF < 7)"] = int(invalides.sum())
-    df = df[~invalides]
+    df = df[df["SF"] >= 7]
 
     # Période couverte par les données
     if "Heure" in df.columns:
@@ -105,8 +103,7 @@ def analyser_fichier(chemin: Path):
     df["Pertinence"] = [classer(r, s) for r, s in zip(df["Redondance"], df["SF"])]
 
     print(f"  {meta['Trames lues']} trames -> {len(df)} DevEUI uniques "
-          f"({meta['Doublons DevEUI supprimés']} doublons supprimés, "
-          f"{meta['Trames invalides ignorées (SF < 7)']} trames invalides ignorées)")
+          f"({meta['Doublons DevEUI supprimés']} doublons supprimés)")
     return df, meta
 
 
@@ -251,7 +248,7 @@ def main() -> None:
             print(f"Ignoré (introuvable) : {cible}")
 
     # On ne retraite pas nos propres fichiers de sortie
-    fichiers = [f for f in fichiers if not f.stem.endswith("_resultats")]
+    fichiers = [f for f in fichiers if not f.stem.endswith(("-analyse", "_resultats"))]
 
     if not fichiers:
         print("Aucun fichier .xlsx à traiter.")
@@ -264,7 +261,12 @@ def main() -> None:
         except Exception as e:
             print(f"  ERREUR : {e}")
             continue
-        sortie = fichier.with_name(f"{fichier.stem}_resultats.xlsx")
+        # Nom de sortie : <fichier>-<date des données JJMM>-analyse.xlsx
+        if "Heure" in df.columns and df["Heure"].notna().any():
+            suffixe = f"-{df['Heure'].max():%d%m}-analyse"
+        else:
+            suffixe = "-analyse"
+        sortie = fichier.with_name(f"{fichier.stem}{suffixe}.xlsx")
         exporter_resultats(df, meta, sortie)
 
 
