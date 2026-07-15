@@ -7,10 +7,11 @@ Pour chaque fichier (traité séparément) :
   2. Suppression des doublons de DevEUI (on garde la trame la plus récente).
   3. Classification de chaque capteur selon sa pertinence :
        - Indispensable   : Redondance = 1 (quel que soit le SF)
-       - Pertinence ++   : Redondance = 2 et SF dans {7, 8, 9}
-       - Pertinence +    : Redondance = 2 et SF > 9
+       - Pertinence +++  : Redondance = 2 et SF dans {7, 8, 9}
+       - Pertinence ++   : Redondance = 2 et SF > 9
+       - Pertinence +    : Redondance 3 ou 4 (le SF n'est pas pris en compte)
        - Non pertinent   : Redondance > 5
-       - À définir       : tout ce qui ne rentre dans aucune règle (ex. Redondance 3 à 5)
+       - À définir       : tout ce qui ne rentre dans aucune règle (ex. Redondance 5)
   4. Export d'un fichier Excel de résultats :
        - Feuille "Synthèse"      : période des données, chiffres clés,
                                    répartition des pertinences + graphique
@@ -39,13 +40,24 @@ from openpyxl.utils import get_column_letter
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 # Ordre d'affichage des catégories et couleur associée (vert -> rouge, gris = à définir)
-CATEGORIES = ["Indispensable", "Pertinence ++", "Pertinence +", "Non pertinent", "À définir"]
+CATEGORIES = ["Indispensable", "Pertinence +++", "Pertinence ++", "Pertinence +",
+              "Non pertinent", "À définir"]
 COULEURS = {
     "Indispensable": "0CA30C",
-    "Pertinence ++": "FAB219",
-    "Pertinence +": "EC835A",
-    "Non pertinent": "D03B3B",
+    "Pertinence +++": "FAB219",
+    "Pertinence ++": "EC835A",
+    "Pertinence +": "D03B3B",
+    "Non pertinent": "8B1A1A",
     "À définir": "8C8C8C",
+}
+# Noms de feuille Excel (pas de '+' ni plus de 31 caractères)
+NOMS_FEUILLE = {
+    "Indispensable": "Indispensable",
+    "Pertinence +++": "Pertinence plus-plus-plus",
+    "Pertinence ++": "Pertinence plus-plus",
+    "Pertinence +": "Pertinence plus",
+    "Non pertinent": "Non pertinent",
+    "À définir": "À définir",
 }
 
 GRAS = Font(bold=True)
@@ -59,8 +71,10 @@ def classer(redondance, sf) -> str:
     if redondance == 1:
         return "Indispensable"
     if redondance == 2 and sf in (7, 8, 9):
-        return "Pertinence ++"
+        return "Pertinence +++"
     if redondance == 2 and sf > 9:
+        return "Pertinence ++"
+    if redondance in (3, 4):
         return "Pertinence +"
     return "À définir"
 
@@ -220,9 +234,7 @@ def exporter_resultats(df: pd.DataFrame, meta: dict, sortie: Path) -> None:
         for cat in CATEGORIES:
             sous_df = df[df["Pertinence"] == cat]
             if not sous_df.empty:
-                # Les noms de feuille Excel n'acceptent ni '+' répétés ni > 31 caractères
-                nom = cat.replace("++", "plus-plus").replace("+", "plus")[:31]
-                sous_df.to_excel(writer, sheet_name=nom, index=False)
+                sous_df.to_excel(writer, sheet_name=NOMS_FEUILLE[cat], index=False)
 
         feuille_synthese(writer.book, df, meta)
         feuille_statistiques(writer.book, df)
