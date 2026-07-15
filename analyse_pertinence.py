@@ -11,8 +11,13 @@ Pour chaque fichier (traité séparément) :
        - Pertinence +    : Redondance = 2 et SF > 9
        - Non pertinent   : Redondance > 5
        - À définir       : tout ce qui ne rentre dans aucune règle (ex. Redondance 3 à 5)
-  4. Export d'un fichier Excel de résultats avec une feuille par catégorie
-     et une feuille de synthèse.
+  4. Export d'un fichier Excel de résultats :
+       - Feuille "Synthèse"      : période des données, chiffres clés,
+                                   répartition des pertinences + graphique
+       - Feuille "Statistiques"  : distribution des SF + graphique,
+                                   qualité du signal (RSSI/SNR) par catégorie,
+                                   activité des capteurs (nb de trames)
+       - Feuille "Tous les capteurs" + une feuille par catégorie
 
 Utilisation :
     python3 analyse_pertinence.py fichier1.xlsx fichier2.xlsx ...
@@ -22,14 +27,29 @@ Utilisation :
 
 import sys
 import warnings
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+from openpyxl.chart import BarChart, PieChart, Reference
+from openpyxl.chart.series import DataPoint
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
-# Ordre d'affichage des catégories dans la synthèse et les feuilles
+# Ordre d'affichage des catégories et couleur associée (vert -> rouge, gris = à définir)
 CATEGORIES = ["Indispensable", "Pertinence ++", "Pertinence +", "Non pertinent", "À définir"]
+COULEURS = {
+    "Indispensable": "0CA30C",
+    "Pertinence ++": "FAB219",
+    "Pertinence +": "EC835A",
+    "Non pertinent": "D03B3B",
+    "À définir": "8C8C8C",
+}
+
+GRAS = Font(bold=True)
+TITRE = Font(bold=True, size=14)
 
 
 def classer(redondance, sf) -> str:
@@ -45,8 +65,11 @@ def classer(redondance, sf) -> str:
     return "À définir"
 
 
-def analyser_fichier(chemin: Path) -> pd.DataFrame:
-    """Lit un fichier Excel, dédoublonne les DevEUI et classe chaque capteur."""
+def analyser_fichier(chemin: Path):
+    """Lit un fichier Excel, dédoublonne les DevEUI et classe chaque capteur.
+
+    Retourne (df dédoublonné et classé, dictionnaire de métadonnées).
+    """
     df = pd.read_excel(chemin)
 
     colonnes_requises = {"DevEUI", "Redondance", "SF"}
@@ -54,38 +77,148 @@ def analyser_fichier(chemin: Path) -> pd.DataFrame:
     if manquantes:
         raise ValueError(f"Colonnes manquantes dans {chemin.name} : {', '.join(sorted(manquantes))}")
 
-    nb_avant = len(df)
+    meta = {"Fichier source": chemin.name,
+            "Date de l'analyse": datetime.now().strftime("%d/%m/%Y %H:%M"),
+            "Trames lues": len(df)}
 
     # Les trames avec SF < 7 sont invalides (le SF LoRaWAN va de 7 à 12)
     invalides = df["SF"] < 7
-    if invalides.any():
-        print(f"  {invalides.sum()} trame(s) invalide(s) ignorée(s) (SF < 7)")
-        df = df[~invalides]
+    meta["Trames invalides ignorées (SF < 7)"] = int(invalides.sum())
+    df = df[~invalides]
+
+    # Période couverte par les données
+    if "Heure" in df.columns:
+        debut, fin = df["Heure"].min(), df["Heure"].max()
+        meta["Période des données"] = f"du {debut:%d/%m/%Y %H:%M} au {fin:%d/%m/%Y %H:%M}"
+        df = df.sort_values("Heure")
+
+    # Nombre de trames émises par capteur (avant dédoublonnage) : mesure d'activité
+    nb_trames = df.groupby("DevEUI").size().rename("Nb trames")
 
     # Dédoublonnage : une seule ligne par DevEUI, on garde la trame la plus récente
-    if "Heure" in df.columns:
-        df = df.sort_values("Heure")
+    nb_avant = len(df)
     df = df.drop_duplicates(subset="DevEUI", keep="last").reset_index(drop=True)
+    meta["Doublons DevEUI supprimés"] = nb_avant - len(df)
+    meta["Capteurs uniques (DevEUI)"] = len(df)
 
-    print(f"  {nb_avant} trames -> {len(df)} DevEUI uniques ({nb_avant - len(df)} doublons supprimés)")
-
+    df = df.merge(nb_trames, on="DevEUI")
     df["Pertinence"] = [classer(r, s) for r, s in zip(df["Redondance"], df["SF"])]
-    return df
+
+    print(f"  {meta['Trames lues']} trames -> {len(df)} DevEUI uniques "
+          f"({meta['Doublons DevEUI supprimés']} doublons supprimés, "
+          f"{meta['Trames invalides ignorées (SF < 7)']} trames invalides ignorées)")
+    return df, meta
 
 
-def exporter_resultats(df: pd.DataFrame, sortie: Path) -> None:
-    """Écrit le fichier Excel de résultats : synthèse + une feuille par catégorie."""
-    synthese = (
-        df["Pertinence"]
-        .value_counts()
-        .reindex(CATEGORIES, fill_value=0)
-        .rename_axis("Pertinence")
-        .reset_index(name="Nombre de capteurs")
-    )
-    synthese["%"] = (synthese["Nombre de capteurs"] / len(df) * 100).round(1)
+def ecrire_tableau(ws, ligne, titre, table: pd.DataFrame) -> int:
+    """Écrit un titre + un DataFrame dans la feuille à partir de `ligne` (1-indexé).
 
+    Retourne la première ligne libre après le tableau.
+    """
+    ws.cell(row=ligne, column=1, value=titre).font = GRAS
+    ligne += 1
+    for j, col in enumerate(table.columns, start=1):
+        ws.cell(row=ligne, column=j, value=col).font = GRAS
+    for i, (_, valeurs) in enumerate(table.iterrows(), start=1):
+        for j, v in enumerate(valeurs, start=1):
+            ws.cell(row=ligne + i, column=j, value=v)
+    return ligne + len(table) + 2
+
+
+def feuille_synthese(wb, df: pd.DataFrame, meta: dict) -> None:
+    ws = wb.create_sheet("Synthèse", 0)
+
+    ws["A1"] = "Analyse de pertinence des capteurs LoRaWAN"
+    ws["A1"].font = TITRE
+
+    # Bloc d'informations générales (dont la période des données)
+    ligne = 3
+    for cle, valeur in meta.items():
+        ws.cell(row=ligne, column=1, value=cle).font = GRAS
+        ws.cell(row=ligne, column=2, value=valeur)
+        ligne += 1
+
+    # Tableau de répartition des pertinences
+    compte = df["Pertinence"].value_counts().reindex(CATEGORIES, fill_value=0)
+    table = pd.DataFrame({
+        "Pertinence": compte.index,
+        "Nombre de capteurs": compte.values,
+        "%": (compte.values / len(df) * 100).round(1),
+    })
+    debut_table = ligne + 1
+    ecrire_tableau(ws, debut_table, "Répartition par pertinence", table)
+
+    # Graphique en secteurs de la répartition
+    pie = PieChart()
+    pie.title = "Répartition des capteurs par pertinence"
+    data = Reference(ws, min_col=2, min_row=debut_table + 1, max_row=debut_table + 1 + len(table))
+    labels = Reference(ws, min_col=1, min_row=debut_table + 2, max_row=debut_table + 1 + len(table))
+    pie.add_data(data, titles_from_data=True)
+    pie.set_categories(labels)
+    serie = pie.series[0]
+    for i, cat in enumerate(CATEGORIES):
+        point = DataPoint(idx=i)
+        point.graphicalProperties.solidFill = COULEURS[cat]
+        serie.data_points.append(point)
+    pie.height, pie.width = 9, 13
+    ws.add_chart(pie, "E3")
+
+    ws.column_dimensions["A"].width = 34
+    ws.column_dimensions["B"].width = 40
+    ws.column_dimensions["C"].width = 8
+
+
+def feuille_statistiques(wb, df: pd.DataFrame) -> None:
+    ws = wb.create_sheet("Statistiques")
+
+    # Distribution des SF
+    sf = df["SF"].value_counts().sort_index()
+    table_sf = pd.DataFrame({"SF": sf.index, "Nombre de capteurs": sf.values})
+    ligne = ecrire_tableau(ws, 1, "Distribution des SF (Spreading Factor)", table_sf)
+
+    bar = BarChart()
+    bar.type = "col"
+    bar.title = "Nombre de capteurs par SF"
+    bar.legend = None
+    data = Reference(ws, min_col=2, min_row=2, max_row=2 + len(table_sf))
+    labels = Reference(ws, min_col=1, min_row=3, max_row=2 + len(table_sf))
+    bar.add_data(data, titles_from_data=True)
+    bar.set_categories(labels)
+    bar.series[0].graphicalProperties.solidFill = "4472C4"
+    bar.height, bar.width = 8, 12
+    ws.add_chart(bar, "E1")
+
+    # Qualité du signal par catégorie de pertinence
+    if {"RSSI", "SNR"} <= set(df.columns):
+        stats = (
+            df.groupby("Pertinence")
+            .agg(**{
+                "Nb capteurs": ("DevEUI", "count"),
+                "RSSI moyen (dBm)": ("RSSI", "mean"),
+                "RSSI min": ("RSSI", "min"),
+                "RSSI max": ("RSSI", "max"),
+                "SNR moyen (dB)": ("SNR", "mean"),
+            })
+            .reindex([c for c in CATEGORIES if c in df["Pertinence"].values])
+            .round(1)
+            .reset_index()
+        )
+        ligne = ecrire_tableau(ws, max(ligne, 18), "Qualité du signal par pertinence", stats)
+
+    # Activité des capteurs (nombre de trames émises sur la période)
+    actifs = df.nlargest(10, "Nb trames")[["DevEUI", "Nb trames", "SF", "Pertinence"]]
+    ws.cell(row=ligne, column=1,
+            value=f"Trames par capteur : moyenne {df['Nb trames'].mean():.1f}, "
+                  f"médiane {df['Nb trames'].median():.0f}, max {df['Nb trames'].max()}").font = GRAS
+    ecrire_tableau(ws, ligne + 1, "Top 10 des capteurs les plus actifs", actifs)
+
+    for col, largeur in zip("ABCDEF", (26, 18, 12, 12, 12, 16)):
+        ws.column_dimensions[col].width = largeur
+
+
+def exporter_resultats(df: pd.DataFrame, meta: dict, sortie: Path) -> None:
+    """Écrit le fichier Excel de résultats : synthèse, statistiques et détail."""
     with pd.ExcelWriter(sortie, engine="openpyxl") as writer:
-        synthese.to_excel(writer, sheet_name="Synthèse", index=False)
         df.to_excel(writer, sheet_name="Tous les capteurs", index=False)
         for cat in CATEGORIES:
             sous_df = df[df["Pertinence"] == cat]
@@ -94,9 +227,13 @@ def exporter_resultats(df: pd.DataFrame, sortie: Path) -> None:
                 nom = cat.replace("++", "plus-plus").replace("+", "plus")[:31]
                 sous_df.to_excel(writer, sheet_name=nom, index=False)
 
+        feuille_synthese(writer.book, df, meta)
+        feuille_statistiques(writer.book, df)
+
     print(f"  Résultats écrits dans : {sortie}")
-    for _, ligne in synthese.iterrows():
-        print(f"    {ligne['Pertinence']:<15} {ligne['Nombre de capteurs']:>5}  ({ligne['%']} %)")
+    compte = df["Pertinence"].value_counts().reindex(CATEGORIES, fill_value=0)
+    for cat, nb in compte.items():
+        print(f"    {cat:<15} {nb:>5}  ({nb / len(df) * 100:.1f} %)")
 
 
 def main() -> None:
@@ -123,12 +260,12 @@ def main() -> None:
     for fichier in fichiers:
         print(f"\nTraitement de : {fichier.name}")
         try:
-            df = analyser_fichier(fichier)
+            df, meta = analyser_fichier(fichier)
         except Exception as e:
             print(f"  ERREUR : {e}")
             continue
         sortie = fichier.with_name(f"{fichier.stem}_resultats.xlsx")
-        exporter_resultats(df, sortie)
+        exporter_resultats(df, meta, sortie)
 
 
 if __name__ == "__main__":
