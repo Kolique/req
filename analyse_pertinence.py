@@ -12,11 +12,16 @@ Pour chaque fichier (traité séparément) :
        - Pertinence +    : Redondance 3 ou 4 (le SF n'est pas pris en compte)
        - Non pertinent   : Redondance > 5
        - À définir       : tout ce qui ne rentre dans aucune règle (ex. Redondance 5)
-Dès que plusieurs fichiers sont traités ensemble (même contrat), une analyse
-globale multi-antennes est produite en plus : 1 fichier = 1 antenne, et la
-redondance réelle de chaque DevEUI est le nombre d'antennes différentes qui
-le reçoivent (un capteur vu par une seule antenne = Indispensable). Le SF
-retenu est le meilleur (le plus bas) observé parmi les antennes.
+Dès que plusieurs fichiers sont traités ensemble (les antennes d'un même
+contrat), la pertinence est calculée par recoupement entre antennes :
+1 fichier = 1 antenne, et pour chaque DevEUI de chaque antenne on cherche
+ce DevEUI dans les AUTRES antennes du contrat. La redondance réelle du
+capteur est le nombre d'antennes qui le reçoivent : s'il n'apparaît dans
+aucune autre antenne, c'est un très bon signal -> Indispensable (Note 1).
+Cette pertinence recalculée figure dans le rapport de chaque antenne
+(avec les colonnes "Nb antennes" et "Vue aussi par"), et un rapport global
+du contrat est produit en plus. Avec un seul fichier, la colonne Redondance
+du fichier est utilisée telle quelle.
 
   4. Export d'un fichier Excel de résultats :
        - Feuille "Synthèse"      : période des données, chiffres clés,
@@ -55,6 +60,15 @@ COULEURS = {
     "Pertinence +": "D03B3B",
     "Non pertinent": "8B1A1A",
     "À définir": "8C8C8C",
+}
+# Note chiffrée associée (1 = très bon signal)
+NOTES = {
+    "Indispensable": 1,
+    "Pertinence +++": 2,
+    "Pertinence ++": 3,
+    "Pertinence +": 4,
+    "Non pertinent": 5,
+    "À définir": None,
 }
 # Noms de feuille Excel (pas de '+' ni plus de 31 caractères)
 NOMS_FEUILLE = {
@@ -121,6 +135,7 @@ def analyser_fichier(chemin: Path):
 
     df = df.merge(nb_trames, on="DevEUI")
     df["Pertinence"] = [classer(r, s) for r, s in zip(df["Redondance"], df["SF"])]
+    df["Note"] = [NOTES[p] for p in df["Pertinence"]]
 
     print(f"  {meta['Trames lues']} trames -> {len(df)} DevEUI uniques "
           f"({meta['Doublons DevEUI supprimés']} doublons supprimés)")
@@ -277,6 +292,7 @@ def analyse_globale(resultats: list) -> pd.DataFrame:
 
     capteurs = tout.groupby("DevEUI").agg(**agregats).reset_index()
     capteurs["Pertinence"] = [classer(n, s) for n, s in zip(capteurs["Nb antennes"], capteurs["SF"])]
+    capteurs["Note"] = [NOTES[p] for p in capteurs["Pertinence"]]
     return capteurs
 
 
@@ -327,6 +343,7 @@ def main() -> None:
         print("Aucun fichier .xlsx à traiter.")
         sys.exit(1)
 
+    # 1re passe : lecture, nettoyage et dédoublonnage de chaque antenne
     resultats = []
     for fichier in fichiers:
         print(f"\nTraitement de : {fichier.name}")
@@ -335,18 +352,45 @@ def main() -> None:
         except Exception as e:
             print(f"  ERREUR : {e}")
             continue
-        resultats.append((fichier, df))
+        resultats.append([fichier, df, meta])
+
+    # Avec plusieurs antennes (même contrat) : pour chaque DevEUI de chaque
+    # antenne, on cherche ce DevEUI dans les autres antennes du contrat.
+    # La pertinence est alors recalculée avec cette redondance réelle
+    # (1 seule antenne = très bon signal = Indispensable, Note 1).
+    if len(resultats) >= 2:
+        vu_par: dict = {}
+        for fichier, df, _ in resultats:
+            for eui in df["DevEUI"]:
+                vu_par.setdefault(eui, set()).add(fichier.stem)
+
+        for element in resultats:
+            fichier, df, meta = element
+            autres = [", ".join(sorted(vu_par[e] - {fichier.stem})) for e in df["DevEUI"]]
+            df["Nb antennes"] = [len(vu_par[e]) for e in df["DevEUI"]]
+            df["Vue aussi par"] = [a if a else "Aucune autre antenne" for a in autres]
+            df["Pertinence"] = [classer(n, s) for n, s in zip(df["Nb antennes"], df["SF"])]
+            df["Note"] = [NOTES[p] for p in df["Pertinence"]]
+            # La pertinence en dernière colonne pour rester lisible
+            df = df[[c for c in df.columns if c not in ("Pertinence", "Note")] + ["Pertinence", "Note"]]
+            element[1] = df
+            meta["Antennes du contrat"] = ", ".join(f.stem for f, _, _ in resultats)
+            meta["Capteurs vus uniquement par cette antenne"] = int((df["Nb antennes"] == 1).sum())
+
+    # 2e passe : export du rapport de chaque antenne
+    for fichier, df, meta in resultats:
         # Nom de sortie : <fichier>-<date des données JJMM>-analyse.xlsx
         if "Heure" in df.columns and df["Heure"].notna().any():
             suffixe = f"-{df['Heure'].max():%d%m}-analyse"
         else:
             suffixe = "-analyse"
         sortie = fichier.with_name(f"{fichier.stem}{suffixe}.xlsx")
+        print(f"\nRapport de l'antenne : {fichier.stem}")
         exporter_resultats(df, meta, sortie)
 
-    # Analyse globale multi-antennes dès qu'il y a plusieurs fichiers (même contrat)
+    # Rapport global du contrat en plus des rapports par antenne
     if len(resultats) >= 2:
-        exporter_globale(resultats, resultats[0][0].parent)
+        exporter_globale([(f, df) for f, df, _ in resultats], resultats[0][0].parent)
 
 
 if __name__ == "__main__":
