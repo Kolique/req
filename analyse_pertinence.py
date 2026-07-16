@@ -33,6 +33,13 @@ du fichier est utilisée telle quelle.
                                    activité des capteurs (nb de trames)
        - Feuille "Tous les capteurs" + une feuille par catégorie
 
+Suivi dans le temps : chaque exécution est historisée dans deux fichiers CSV
+(<contrat>-historique-syntheses.csv et <contrat>-historique-capteurs.csv) et
+le fichier <contrat>-suivi.xlsx est régénéré avec la courbe d'évolution des
+pertinences et la liste des capteurs ayant changé (nouveau, disparu,
+amélioration, dégradation) depuis l'analyse précédente. Relancer sur les
+mêmes données (même date) remplace la ligne du jour au lieu de la dupliquer.
+
 Utilisation :
     python3 analyse_pertinence.py fichier1.xlsx fichier2.xlsx ...
     python3 analyse_pertinence.py dossier/          # traite tous les .xlsx du dossier
@@ -320,6 +327,105 @@ def exporter_globale(resultats: list, dossier: Path) -> None:
     sortie = dossier / f"{nom_contrat}-analyse-globale{suffixe}.xlsx"
     print(f"\nAnalyse globale du contrat '{nom_contrat}' ({len(resultats)} antennes)")
     exporter_resultats(capteurs, meta, sortie)
+    return capteurs
+
+
+def mettre_a_jour_suivi(capteurs: pd.DataFrame, dossier: Path, date_donnees) -> None:
+    """Historise l'analyse du jour et régénère le fichier de suivi du contrat.
+
+    Deux fichiers CSV servent de mémoire entre les exécutions :
+      - <contrat>-historique-syntheses.csv : une ligne par analyse (répartition)
+      - <contrat>-historique-capteurs.csv  : la pertinence de chaque DevEUI à chaque analyse
+    Le fichier <contrat>-suivi.xlsx est régénéré à chaque fois : courbe
+    d'évolution des pertinences + capteurs ayant changé depuis l'analyse précédente.
+    Relancer le script sur les mêmes données (même date) remplace la ligne du jour.
+    """
+    from openpyxl import Workbook
+    from openpyxl.chart import LineChart
+
+    nom = dossier.resolve().name or "contrat"
+    date_str = f"{date_donnees:%Y-%m-%d}" if date_donnees is not None else datetime.now().strftime("%Y-%m-%d")
+
+    # 1. Historique des synthèses (une ligne par date de données)
+    compte = capteurs["Pertinence"].value_counts().reindex(CATEGORIES, fill_value=0)
+    ligne = {"Date": date_str, "Capteurs": len(capteurs), **{c: int(n) for c, n in compte.items()}}
+    chemin_synth = dossier / f"{nom}-historique-syntheses.csv"
+    if chemin_synth.exists():
+        historique = pd.read_csv(chemin_synth)
+        historique = historique[historique["Date"] != date_str]
+        historique = pd.concat([historique, pd.DataFrame([ligne])], ignore_index=True)
+    else:
+        historique = pd.DataFrame([ligne])
+    historique = historique.sort_values("Date").reset_index(drop=True)
+    historique.to_csv(chemin_synth, index=False)
+
+    # 2. Historique par capteur (pour détecter les changements de pertinence)
+    detail = capteurs[["DevEUI", "Pertinence", "Note"]].copy()
+    detail.insert(0, "Date", date_str)
+    chemin_capt = dossier / f"{nom}-historique-capteurs.csv"
+    if chemin_capt.exists():
+        hist_capteurs = pd.read_csv(chemin_capt)
+        hist_capteurs = hist_capteurs[hist_capteurs["Date"] != date_str]
+        hist_capteurs = pd.concat([hist_capteurs, detail], ignore_index=True)
+    else:
+        hist_capteurs = detail
+    hist_capteurs.to_csv(chemin_capt, index=False)
+
+    # 3. Fichier de suivi : évolution + changements
+    wb = Workbook()
+
+    ws = wb.active
+    ws.title = "Évolution"
+    ws["A1"] = f"Suivi de la pertinence — contrat {nom}"
+    ws["A1"].font = TITRE
+    ecrire_tableau(ws, 3, "Historique des analyses", historique)
+
+    graph = LineChart()
+    graph.title = "Évolution du nombre de capteurs par pertinence"
+    graph.y_axis.title = "Nombre de capteurs"
+    # Colonnes : A=Date, B=Capteurs, C.. = catégories (lignes 4=en-têtes, 5..=données)
+    data = Reference(ws, min_col=3, max_col=2 + len(CATEGORIES), min_row=4, max_row=4 + len(historique))
+    graph.add_data(data, titles_from_data=True)
+    graph.set_categories(Reference(ws, min_col=1, min_row=5, max_row=4 + len(historique)))
+    for i, cat in enumerate(CATEGORIES):
+        serie = graph.series[i]
+        serie.graphicalProperties.line.solidFill = COULEURS[cat]
+        serie.graphicalProperties.line.width = 25000  # ~2 pt
+        serie.smooth = False
+    graph.height, graph.width = 10, 22
+    ws.add_chart(graph, f"A{6 + len(historique)}")
+    ws.column_dimensions["A"].width = 14
+
+    ws2 = wb.create_sheet("Changements")
+    dates = sorted(hist_capteurs["Date"].unique())
+    if len(dates) < 2:
+        ws2["A1"] = "Première analyse : les changements apparaîtront à partir de la prochaine exécution."
+    else:
+        avant, apres = dates[-2], dates[-1]
+        p_avant = hist_capteurs[hist_capteurs["Date"] == avant].set_index("DevEUI")["Pertinence"]
+        p_apres = hist_capteurs[hist_capteurs["Date"] == apres].set_index("DevEUI")["Pertinence"]
+        lignes = []
+        for eui in sorted(set(p_avant.index) | set(p_apres.index)):
+            av, ap = p_avant.get(eui), p_apres.get(eui)
+            if av is None:
+                lignes.append({"DevEUI": eui, "Avant": "—", "Après": ap, "Changement": "Nouveau capteur"})
+            elif ap is None:
+                lignes.append({"DevEUI": eui, "Avant": av, "Après": "—", "Changement": "Capteur disparu"})
+            elif av != ap:
+                sens = "Amélioration" if (NOTES.get(ap) or 9) < (NOTES.get(av) or 9) else "Dégradation"
+                lignes.append({"DevEUI": eui, "Avant": av, "Après": ap, "Changement": sens})
+        ws2["A1"] = f"Changements entre le {avant} et le {apres}"
+        ws2["A1"].font = GRAS
+        if lignes:
+            ecrire_tableau(ws2, 3, f"{len(lignes)} capteur(s) concerné(s)", pd.DataFrame(lignes))
+        else:
+            ws2["A3"] = "Aucun changement de pertinence."
+        for col, largeur in zip("ABCD", (26, 16, 16, 20)):
+            ws2.column_dimensions[col].width = largeur
+
+    sortie = dossier / f"{nom}-suivi.xlsx"
+    wb.save(sortie)
+    print(f"  Suivi mis à jour : {sortie} ({len(historique)} analyse(s) dans l'historique)")
 
 
 def main() -> None:
@@ -338,7 +444,7 @@ def main() -> None:
 
     # On ne retraite pas nos propres fichiers de sortie
     fichiers = [f for f in fichiers
-                if not f.stem.endswith(("-analyse", "_resultats"))
+                if not f.stem.endswith(("-analyse", "_resultats", "-suivi"))
                 and "-analyse-globale" not in f.stem]
 
     if not fichiers:
@@ -394,9 +500,17 @@ def main() -> None:
         print(f"\nRapport de l'antenne : {fichier.stem}")
         exporter_resultats(df, meta, sortie)
 
-    # Rapport global du contrat en plus des rapports par antenne
+    # Rapport global du contrat en plus des rapports par antenne,
+    # puis mise à jour du suivi dans le temps
     if len(resultats) >= 2:
-        exporter_globale([(f, df) for f, df, _ in resultats], resultats[0][0].parent)
+        dossier = resultats[0][0].parent
+        capteurs = exporter_globale([(f, df) for f, df, _ in resultats], dossier)
+        heures = [df["Heure"].max() for _, df, _ in resultats if "Heure" in df.columns]
+        mettre_a_jour_suivi(capteurs, dossier, max(heures) if heures else None)
+    elif resultats:
+        fichier, df, _ = resultats[0]
+        date_donnees = df["Heure"].max() if "Heure" in df.columns else None
+        mettre_a_jour_suivi(df, fichier.parent, date_donnees)
 
 
 if __name__ == "__main__":
