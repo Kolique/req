@@ -40,10 +40,17 @@ pertinences et la liste des capteurs ayant changé (nouveau, disparu,
 amélioration, dégradation) depuis l'analyse précédente. Relancer sur les
 mêmes données (même date) remplace la ligne du jour au lieu de la dupliquer.
 
+Organisation des dossiers : un dossier par contrat (ex. 863/), contenant un
+sous-dossier Annexe/ avec les fichiers Excel des antennes (à défaut, les .xlsx
+à la racine du dossier du contrat sont utilisés). Tous les fichiers générés
+(rapports, analyse globale, suivi, historiques) vont dans le sous-dossier
+Résultat/ du contrat, créé si besoin.
+
 Utilisation :
-    python3 analyse_pertinence.py fichier1.xlsx fichier2.xlsx ...
-    python3 analyse_pertinence.py dossier/          # traite tous les .xlsx du dossier
-    python3 analyse_pertinence.py                   # traite tous les .xlsx du dossier courant
+    python3 analyse_pertinence.py              # traite tous les contrats du dossier courant
+    python3 analyse_pertinence.py 863/         # traite un contrat précis
+    python3 analyse_pertinence.py 863/ 455/    # traite plusieurs contrats
+    python3 analyse_pertinence.py a.xlsx b.xlsx  # fichiers passés directement
 """
 
 import sys
@@ -305,7 +312,7 @@ def analyse_globale(resultats: list) -> pd.DataFrame:
     return capteurs
 
 
-def exporter_globale(resultats: list, dossier: Path) -> None:
+def exporter_globale(resultats: list, dossier_sortie: Path, nom_contrat: str) -> pd.DataFrame:
     capteurs = analyse_globale(resultats)
 
     meta = {
@@ -323,62 +330,74 @@ def exporter_globale(resultats: list, dossier: Path) -> None:
     else:
         suffixe = ""
 
-    nom_contrat = dossier.resolve().name or "contrat"
-    sortie = dossier / f"{nom_contrat}-analyse-globale{suffixe}.xlsx"
+    sortie = dossier_sortie / f"{nom_contrat}-analyse-globale{suffixe}.xlsx"
     print(f"\nAnalyse globale du contrat '{nom_contrat}' ({len(resultats)} antennes)")
     exporter_resultats(capteurs, meta, sortie)
     return capteurs
 
 
-def mettre_a_jour_suivi(capteurs: pd.DataFrame, dossier: Path, date_donnees) -> None:
+def actualiser_csv(chemin: Path, nouvelles_lignes: pd.DataFrame, date_str: str) -> pd.DataFrame:
+    """Ajoute les lignes du jour à un CSV d'historique (remplace la même date)."""
+    if chemin.exists():
+        historique = pd.read_csv(chemin)
+        historique = historique[historique["Date"] != date_str]
+        historique = pd.concat([historique, nouvelles_lignes], ignore_index=True)
+    else:
+        historique = nouvelles_lignes
+    historique = historique.sort_values("Date", kind="stable").reset_index(drop=True)
+    historique.to_csv(chemin, index=False)
+    return historique
+
+
+def compter_pertinences(df: pd.DataFrame) -> dict:
+    compte = df["Pertinence"].value_counts().reindex(CATEGORIES, fill_value=0)
+    return {c: int(n) for c, n in compte.items()}
+
+
+def mettre_a_jour_suivi(resultats: list, capteurs: pd.DataFrame, dossier: Path,
+                        nom: str, date_donnees) -> None:
     """Historise l'analyse du jour et régénère le fichier de suivi du contrat.
 
-    Deux fichiers CSV servent de mémoire entre les exécutions :
-      - <contrat>-historique-syntheses.csv : une ligne par analyse (répartition)
+    Trois fichiers CSV servent de mémoire entre les exécutions :
+      - <contrat>-historique-syntheses.csv : une ligne par analyse (contrat entier)
+      - <contrat>-historique-antennes.csv  : une ligne par antenne et par analyse
       - <contrat>-historique-capteurs.csv  : la pertinence de chaque DevEUI à chaque analyse
     Le fichier <contrat>-suivi.xlsx est régénéré à chaque fois : courbe
-    d'évolution des pertinences + capteurs ayant changé depuis l'analyse précédente.
+    d'évolution des pertinences, stats par antenne pour chaque date d'analyse,
+    et capteurs ayant changé depuis l'analyse précédente.
     Relancer le script sur les mêmes données (même date) remplace la ligne du jour.
     """
     from openpyxl import Workbook
     from openpyxl.chart import LineChart
 
-    nom = dossier.resolve().name or "contrat"
     date_str = f"{date_donnees:%Y-%m-%d}" if date_donnees is not None else datetime.now().strftime("%Y-%m-%d")
 
-    # 1. Historique des synthèses (une ligne par date de données)
-    compte = capteurs["Pertinence"].value_counts().reindex(CATEGORIES, fill_value=0)
-    ligne = {"Date": date_str, "Capteurs": len(capteurs), **{c: int(n) for c, n in compte.items()}}
-    chemin_synth = dossier / f"{nom}-historique-syntheses.csv"
-    if chemin_synth.exists():
-        historique = pd.read_csv(chemin_synth)
-        historique = historique[historique["Date"] != date_str]
-        historique = pd.concat([historique, pd.DataFrame([ligne])], ignore_index=True)
-    else:
-        historique = pd.DataFrame([ligne])
-    historique = historique.sort_values("Date").reset_index(drop=True)
-    historique.to_csv(chemin_synth, index=False)
+    # 1. Historique global du contrat (une ligne par date de données)
+    ligne = {"Date": date_str, "Capteurs": len(capteurs), **compter_pertinences(capteurs)}
+    historique = actualiser_csv(dossier / f"{nom}-historique-syntheses.csv",
+                                pd.DataFrame([ligne]), date_str)
 
-    # 2. Historique par capteur (pour détecter les changements de pertinence)
+    # 2. Historique par antenne (les stats de chaque antenne à chaque analyse)
+    lignes_antennes = [
+        {"Date": date_str, "Antenne": fichier.stem, "Capteurs": len(df), **compter_pertinences(df)}
+        for fichier, df, _ in resultats
+    ]
+    hist_antennes = actualiser_csv(dossier / f"{nom}-historique-antennes.csv",
+                                   pd.DataFrame(lignes_antennes), date_str)
+
+    # 3. Historique par capteur (pour détecter les changements de pertinence)
     detail = capteurs[["DevEUI", "Pertinence", "Note"]].copy()
     detail.insert(0, "Date", date_str)
-    chemin_capt = dossier / f"{nom}-historique-capteurs.csv"
-    if chemin_capt.exists():
-        hist_capteurs = pd.read_csv(chemin_capt)
-        hist_capteurs = hist_capteurs[hist_capteurs["Date"] != date_str]
-        hist_capteurs = pd.concat([hist_capteurs, detail], ignore_index=True)
-    else:
-        hist_capteurs = detail
-    hist_capteurs.to_csv(chemin_capt, index=False)
+    hist_capteurs = actualiser_csv(dossier / f"{nom}-historique-capteurs.csv", detail, date_str)
 
-    # 3. Fichier de suivi : évolution + changements
+    # 4. Fichier de suivi : évolution globale + détail par antenne + changements
     wb = Workbook()
 
     ws = wb.active
     ws.title = "Évolution"
     ws["A1"] = f"Suivi de la pertinence — contrat {nom}"
     ws["A1"].font = TITRE
-    ecrire_tableau(ws, 3, "Historique des analyses", historique)
+    ecrire_tableau(ws, 3, "Historique des analyses (contrat entier)", historique)
 
     graph = LineChart()
     graph.title = "Évolution du nombre de capteurs par pertinence"
@@ -395,6 +414,19 @@ def mettre_a_jour_suivi(capteurs: pd.DataFrame, dossier: Path, date_donnees) -> 
     graph.height, graph.width = 10, 22
     ws.add_chart(graph, f"A{6 + len(historique)}")
     ws.column_dimensions["A"].width = 14
+
+    # Feuille "Par antenne" : les stats de chaque antenne du contrat,
+    # une ligne par date d'analyse
+    ws_ant = wb.create_sheet("Par antenne")
+    ws_ant["A1"] = f"Suivi par antenne — contrat {nom}"
+    ws_ant["A1"].font = TITRE
+    ligne_courante = 3
+    for antenne in sorted(hist_antennes["Antenne"].unique()):
+        bloc = hist_antennes[hist_antennes["Antenne"] == antenne].drop(columns="Antenne")
+        ligne_courante = ecrire_tableau(ws_ant, ligne_courante, f"Antenne : {antenne}", bloc)
+    ws_ant.column_dimensions["A"].width = 14
+    for col in "BCDEFGH":
+        ws_ant.column_dimensions[col].width = 15
 
     ws2 = wb.create_sheet("Changements")
     dates = sorted(hist_capteurs["Date"].unique())
@@ -428,28 +460,37 @@ def mettre_a_jour_suivi(capteurs: pd.DataFrame, dossier: Path, date_donnees) -> 
     print(f"  Suivi mis à jour : {sortie} ({len(historique)} analyse(s) dans l'historique)")
 
 
-def main() -> None:
-    args = sys.argv[1:]
+def filtrer_sorties(fichiers) -> list:
+    """Écarte les fichiers générés par le script lui-même."""
+    return [f for f in sorted(fichiers)
+            if not f.stem.endswith(("-analyse", "_resultats", "-suivi"))
+            and "-analyse-globale" not in f.stem
+            and not f.name.startswith("~$")]
 
-    # Constitution de la liste des fichiers à traiter
-    fichiers: list[Path] = []
-    cibles = [Path(a) for a in args] if args else [Path(".")]
-    for cible in cibles:
-        if cible.is_dir():
-            fichiers.extend(sorted(cible.glob("*.xlsx")))
-        elif cible.is_file():
-            fichiers.append(cible)
-        else:
-            print(f"Ignoré (introuvable) : {cible}")
 
-    # On ne retraite pas nos propres fichiers de sortie
-    fichiers = [f for f in fichiers
-                if not f.stem.endswith(("-analyse", "_resultats", "-suivi"))
-                and "-analyse-globale" not in f.stem]
+def fichiers_du_contrat(dossier: Path) -> list:
+    """Fichiers des antennes d'un contrat : dans Annexe/ si présent, sinon à la racine."""
+    for sous in dossier.iterdir():
+        if sous.is_dir() and sous.name.lower() in ("annexe", "annexes"):
+            xlsx = filtrer_sorties(sous.glob("*.xlsx"))
+            if xlsx:
+                return xlsx
+    return filtrer_sorties(dossier.glob("*.xlsx"))
 
-    if not fichiers:
-        print("Aucun fichier .xlsx à traiter.")
-        sys.exit(1)
+
+def dossier_resultat(dossier: Path) -> Path:
+    """Renvoie le sous-dossier Résultat du contrat (créé si absent)."""
+    for sous in dossier.iterdir():
+        if sous.is_dir() and sous.name.lower() in ("résultat", "resultat", "résultats", "resultats"):
+            return sous
+    sortie = dossier / "Résultat"
+    sortie.mkdir(exist_ok=True)
+    return sortie
+
+
+def traiter_contrat(nom: str, fichiers: list, dossier: Path) -> None:
+    """Pipeline complet d'un contrat : rapports par antenne, global et suivi."""
+    sortie_dir = dossier_resultat(dossier)
 
     # 1re passe : lecture, nettoyage et dédoublonnage de chaque antenne
     resultats = []
@@ -489,28 +530,70 @@ def main() -> None:
             meta["Antennes du contrat"] = ", ".join(f.stem for f, _, _ in resultats)
             meta["Capteurs vus uniquement par cette antenne"] = int((df["Nb antennes"] == 1).sum())
 
-    # 2e passe : export du rapport de chaque antenne
+    # 2e passe : export du rapport de chaque antenne dans Résultat/
     for fichier, df, meta in resultats:
-        # Nom de sortie : <fichier>-<date des données JJMM>-analyse.xlsx
+        # Nom de sortie : <antenne>-<date des données JJMM>-analyse.xlsx
         if "Heure" in df.columns and df["Heure"].notna().any():
             suffixe = f"-{df['Heure'].max():%d%m}-analyse"
         else:
             suffixe = "-analyse"
-        sortie = fichier.with_name(f"{fichier.stem}{suffixe}.xlsx")
+        sortie = sortie_dir / f"{fichier.stem}{suffixe}.xlsx"
         print(f"\nRapport de l'antenne : {fichier.stem}")
         exporter_resultats(df, meta, sortie)
 
+    if not resultats:
+        return
+
     # Rapport global du contrat en plus des rapports par antenne,
     # puis mise à jour du suivi dans le temps
+    heures = [df["Heure"].max() for _, df, _ in resultats if "Heure" in df.columns]
+    date_donnees = max(heures) if heures else None
     if len(resultats) >= 2:
-        dossier = resultats[0][0].parent
-        capteurs = exporter_globale([(f, df) for f, df, _ in resultats], dossier)
-        heures = [df["Heure"].max() for _, df, _ in resultats if "Heure" in df.columns]
-        mettre_a_jour_suivi(capteurs, dossier, max(heures) if heures else None)
-    elif resultats:
-        fichier, df, _ = resultats[0]
-        date_donnees = df["Heure"].max() if "Heure" in df.columns else None
-        mettre_a_jour_suivi(df, fichier.parent, date_donnees)
+        capteurs = exporter_globale([(f, df) for f, df, _ in resultats], sortie_dir, nom)
+    else:
+        capteurs = resultats[0][1]
+    mettre_a_jour_suivi(resultats, capteurs, sortie_dir, nom, date_donnees)
+
+
+def main() -> None:
+    args = sys.argv[1:]
+    cibles = [Path(a) for a in args] if args else [Path(".")]
+
+    # Découverte des contrats à traiter :
+    #  - un dossier contenant des .xlsx (directement ou dans Annexe/) = un contrat
+    #  - un dossier sans .xlsx = on cherche des contrats dans ses sous-dossiers
+    #  - des fichiers .xlsx passés directement = un contrat ad hoc
+    contrats: list = []
+    fichiers_directs: list = []
+    for cible in cibles:
+        if cible.is_file():
+            fichiers_directs.append(cible)
+        elif cible.is_dir():
+            xlsx = fichiers_du_contrat(cible)
+            if xlsx:
+                contrats.append((cible.resolve().name or "contrat", xlsx, cible))
+            else:
+                for sous in sorted(cible.iterdir()):
+                    if sous.is_dir() and not sous.name.startswith((".", "_")):
+                        xlsx = fichiers_du_contrat(sous)
+                        if xlsx:
+                            contrats.append((sous.name, xlsx, sous))
+        else:
+            print(f"Ignoré (introuvable) : {cible}")
+
+    if fichiers_directs:
+        fichiers_directs = filtrer_sorties(fichiers_directs)
+        if fichiers_directs:
+            parent = fichiers_directs[0].parent
+            contrats.append((parent.resolve().name or "contrat", fichiers_directs, parent))
+
+    if not contrats:
+        print("Aucun fichier .xlsx à traiter.")
+        sys.exit(1)
+
+    for nom, fichiers, dossier in contrats:
+        print(f"\n{'=' * 50}\nContrat : {nom} ({len(fichiers)} fichier(s) d'antenne)\n{'=' * 50}")
+        traiter_contrat(nom, fichiers, dossier)
 
 
 if __name__ == "__main__":
