@@ -12,6 +12,12 @@ Pour chaque fichier (traité séparément) :
        - Pertinence +    : Redondance 3 ou 4 (le SF n'est pas pris en compte)
        - Non pertinent   : Redondance > 5
        - À définir       : tout ce qui ne rentre dans aucune règle (ex. Redondance 5)
+Dès que plusieurs fichiers sont traités ensemble (même contrat), une analyse
+globale multi-antennes est produite en plus : 1 fichier = 1 antenne, et la
+redondance réelle de chaque DevEUI est le nombre d'antennes différentes qui
+le reçoivent (un capteur vu par une seule antenne = Indispensable). Le SF
+retenu est le meilleur (le plus bas) observé parmi les antennes.
+
   4. Export d'un fichier Excel de résultats :
        - Feuille "Synthèse"      : période des données, chiffres clés,
                                    répartition des pertinences + graphique
@@ -245,6 +251,59 @@ def exporter_resultats(df: pd.DataFrame, meta: dict, sortie: Path) -> None:
         print(f"    {cat:<15} {nb:>5}  ({nb / len(df) * 100:.1f} %)")
 
 
+def analyse_globale(resultats: list) -> pd.DataFrame:
+    """Analyse croisée multi-antennes : 1 fichier = 1 antenne.
+
+    Pour chaque DevEUI, la redondance réelle est le nombre d'antennes
+    différentes qui le reçoivent. Un capteur vu par une seule antenne
+    est indispensable. Le SF retenu est le meilleur (le plus bas)
+    observé parmi les antennes.
+    """
+    trames = []
+    for chemin, df in resultats:
+        d = df.copy()
+        d["Antenne"] = chemin.stem
+        trames.append(d)
+    tout = pd.concat(trames, ignore_index=True)
+
+    agregats = {
+        "Nb antennes": ("Antenne", "nunique"),
+        "Antennes": ("Antenne", lambda s: ", ".join(sorted(set(s)))),
+        "SF": ("SF", "min"),
+        "Nb trames": ("Nb trames", "sum"),
+    }
+    if "Heure" in tout.columns:
+        agregats["Dernière trame"] = ("Heure", "max")
+
+    capteurs = tout.groupby("DevEUI").agg(**agregats).reset_index()
+    capteurs["Pertinence"] = [classer(n, s) for n, s in zip(capteurs["Nb antennes"], capteurs["SF"])]
+    return capteurs
+
+
+def exporter_globale(resultats: list, dossier: Path) -> None:
+    capteurs = analyse_globale(resultats)
+
+    meta = {
+        "Type d'analyse": "Globale multi-antennes (redondance = nb d'antennes recevant le capteur)",
+        "Date de l'analyse": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "Antennes analysées": ", ".join(chemin.stem for chemin, _ in resultats),
+        "Nombre d'antennes": len(resultats),
+        "Capteurs uniques (DevEUI)": len(capteurs),
+        "Capteurs vus par une seule antenne": int((capteurs["Nb antennes"] == 1).sum()),
+    }
+    if "Dernière trame" in capteurs.columns:
+        heures = pd.concat([df["Heure"] for _, df in resultats if "Heure" in df.columns])
+        meta["Période des données"] = f"du {heures.min():%d/%m/%Y %H:%M} au {heures.max():%d/%m/%Y %H:%M}"
+        suffixe = f"-{heures.max():%d%m}"
+    else:
+        suffixe = ""
+
+    nom_contrat = dossier.resolve().name or "contrat"
+    sortie = dossier / f"{nom_contrat}-analyse-globale{suffixe}.xlsx"
+    print(f"\nAnalyse globale du contrat '{nom_contrat}' ({len(resultats)} antennes)")
+    exporter_resultats(capteurs, meta, sortie)
+
+
 def main() -> None:
     args = sys.argv[1:]
 
@@ -260,12 +319,15 @@ def main() -> None:
             print(f"Ignoré (introuvable) : {cible}")
 
     # On ne retraite pas nos propres fichiers de sortie
-    fichiers = [f for f in fichiers if not f.stem.endswith(("-analyse", "_resultats"))]
+    fichiers = [f for f in fichiers
+                if not f.stem.endswith(("-analyse", "_resultats"))
+                and "-analyse-globale" not in f.stem]
 
     if not fichiers:
         print("Aucun fichier .xlsx à traiter.")
         sys.exit(1)
 
+    resultats = []
     for fichier in fichiers:
         print(f"\nTraitement de : {fichier.name}")
         try:
@@ -273,6 +335,7 @@ def main() -> None:
         except Exception as e:
             print(f"  ERREUR : {e}")
             continue
+        resultats.append((fichier, df))
         # Nom de sortie : <fichier>-<date des données JJMM>-analyse.xlsx
         if "Heure" in df.columns and df["Heure"].notna().any():
             suffixe = f"-{df['Heure'].max():%d%m}-analyse"
@@ -280,6 +343,10 @@ def main() -> None:
             suffixe = "-analyse"
         sortie = fichier.with_name(f"{fichier.stem}{suffixe}.xlsx")
         exporter_resultats(df, meta, sortie)
+
+    # Analyse globale multi-antennes dès qu'il y a plusieurs fichiers (même contrat)
+    if len(resultats) >= 2:
+        exporter_globale(resultats, resultats[0][0].parent)
 
 
 if __name__ == "__main__":
