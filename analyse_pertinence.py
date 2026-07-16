@@ -15,9 +15,10 @@ Pour chaque fichier (traité séparément) :
 Dès que plusieurs fichiers sont traités ensemble (les antennes d'un même
 contrat), la pertinence est calculée par recoupement entre antennes :
 1 fichier = 1 antenne, et pour chaque DevEUI de chaque antenne on cherche
-ce DevEUI dans les AUTRES antennes du contrat. La redondance réelle du
-capteur est le nombre d'antennes qui le reçoivent : s'il n'apparaît dans
-aucune autre antenne, c'est un très bon signal -> Indispensable (Note 1).
+ce DevEUI dans les AUTRES antennes du contrat. La redondance retenue est
+le pire des deux entre la colonne Redondance du fichier et le nombre
+d'antennes du contrat qui reçoivent le capteur : un capteur n'est
+Indispensable (très bon signal, Note 1) que si les deux valent 1.
 Cette pertinence recalculée figure dans le rapport de chaque antenne
 (avec les colonnes "Nb antennes" et "Vue aussi par"), et un rapport global
 du contrat est produit en plus. Avec un seul fichier, la colonne Redondance
@@ -284,6 +285,7 @@ def analyse_globale(resultats: list) -> pd.DataFrame:
     agregats = {
         "Nb antennes": ("Antenne", "nunique"),
         "Antennes": ("Antenne", lambda s: ", ".join(sorted(set(s)))),
+        "Redondance max": ("Redondance", "max"),
         "SF": ("SF", "min"),
         "Nb trames": ("Nb trames", "sum"),
     }
@@ -291,7 +293,10 @@ def analyse_globale(resultats: list) -> pd.DataFrame:
         agregats["Dernière trame"] = ("Heure", "max")
 
     capteurs = tout.groupby("DevEUI").agg(**agregats).reset_index()
-    capteurs["Pertinence"] = [classer(n, s) for n, s in zip(capteurs["Nb antennes"], capteurs["SF"])]
+    # Même règle que pour les rapports par antenne : le pire des deux entre
+    # la colonne Redondance des fichiers et le nombre d'antennes du contrat
+    capteurs["Redondance retenue"] = capteurs[["Redondance max", "Nb antennes"]].max(axis=1)
+    capteurs["Pertinence"] = [classer(r, s) for r, s in zip(capteurs["Redondance retenue"], capteurs["SF"])]
     capteurs["Note"] = [NOTES[p] for p in capteurs["Pertinence"]]
     return capteurs
 
@@ -369,7 +374,11 @@ def main() -> None:
             autres = [", ".join(sorted(vu_par[e] - {fichier.stem})) for e in df["DevEUI"]]
             df["Nb antennes"] = [len(vu_par[e]) for e in df["DevEUI"]]
             df["Vue aussi par"] = [a if a else "Aucune autre antenne" for a in autres]
-            df["Pertinence"] = [classer(n, s) for n, s in zip(df["Nb antennes"], df["SF"])]
+            # Redondance retenue : le pire des deux entre la colonne Redondance
+            # du fichier et le nombre d'antennes du contrat qui voient le capteur.
+            # Un capteur n'est Indispensable que si les deux valent 1.
+            df["Redondance retenue"] = df[["Redondance", "Nb antennes"]].max(axis=1)
+            df["Pertinence"] = [classer(r, s) for r, s in zip(df["Redondance retenue"], df["SF"])]
             df["Note"] = [NOTES[p] for p in df["Pertinence"]]
             # La pertinence en dernière colonne pour rester lisible
             df = df[[c for c in df.columns if c not in ("Pertinence", "Note")] + ["Pertinence", "Note"]]
