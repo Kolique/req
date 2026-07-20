@@ -6,20 +6,21 @@ Pour chaque fichier (traité séparément) :
   1. Suppression des doublons de DevEUI (on garde la trame la plus récente).
      Aucune trame n'est écartée sur le SF : il ne sert qu'au niveau de pertinence.
   2. Classification de chaque capteur selon sa pertinence :
-       - Indispensable   : Redondance = 1 (quel que soit le SF)
+       - Indispensable   : Redondance = 1 ET SF = 7
        - Pertinence +++  : Redondance = 2 et SF dans {7, 8, 9}
        - Pertinence ++   : Redondance = 2 et SF > 9
        - Pertinence +    : Redondance 3 ou 4 (le SF n'est pas pris en compte)
        - Non pertinent   : Redondance > 5
-       - À définir       : tout ce qui ne rentre dans aucune règle (ex. Redondance 5)
+       - À définir       : tout ce qui ne rentre dans aucune règle
+                           (ex. Redondance 1 avec SF != 7, ou Redondance 5)
 Dès que plusieurs fichiers sont traités ensemble (les antennes d'un même
 contrat), la pertinence est calculée par recoupement entre antennes :
 1 fichier = 1 antenne, et pour chaque DevEUI de chaque antenne on cherche
 ce DevEUI dans les AUTRES antennes du contrat. La redondance réelle est le
 nombre d'antennes du contrat qui reçoivent le capteur : s'il n'apparaît
-dans aucune autre antenne, c'est un très bon signal -> Indispensable
-(Note 1), même si la colonne Redondance du fichier est > 1 (elle compte
-seulement le nombre de fois où l'antenne l'a entendu dans la journée).
+dans aucune autre antenne ET qu'il est en SF7, c'est un très bon signal
+-> Indispensable (Note 1), même si la colonne Redondance du fichier est > 1
+(elle compte seulement le nombre de fois où l'antenne l'a entendu).
 Cette pertinence recalculée figure dans le rapport de chaque antenne
 (avec les colonnes "Nb antennes" et "Vue aussi par"), et un rapport global
 du contrat est produit en plus. Avec un seul fichier, la colonne Redondance
@@ -101,10 +102,14 @@ TITRE = Font(bold=True, size=14)
 
 
 def classer(redondance, sf) -> str:
-    """Applique les règles de pertinence à une trame."""
+    """Applique les règles de pertinence à un capteur.
+
+    redondance = nombre d'antennes du contrat qui entendent le capteur
+    (ou la colonne Redondance du fichier s'il n'y a qu'un seul fichier).
+    """
     if redondance > 5:
         return "Non pertinent"
-    if redondance == 1:
+    if redondance == 1 and sf == 7:
         return "Indispensable"
     if redondance == 2 and sf in (7, 8, 9):
         return "Pertinence +++"
@@ -112,7 +117,7 @@ def classer(redondance, sf) -> str:
         return "Pertinence ++"
     if redondance in (3, 4):
         return "Pertinence +"
-    return "À définir"
+    return "À définir"  # ex. redondance 1 avec SF != 7, ou redondance 5
 
 
 def analyser_fichier(chemin: Path) -> pd.DataFrame:
@@ -484,10 +489,10 @@ def croiser_antennes(antennes: list) -> tuple:
 
     Avec plusieurs antennes : pour chaque DevEUI de chaque antenne, on cherche
     ce DevEUI dans les autres antennes du contrat. Un capteur entendu par une
-    seule antenne du contrat est Indispensable (Note 1). La colonne Redondance
-    du fichier n'est pas utilisée : elle compte le nombre de fois où l'antenne
-    a entendu le capteur, pas le nombre d'antennes. Avec une seule antenne,
-    la colonne Redondance est utilisée telle quelle.
+    seule antenne du contrat, en SF7, est Indispensable (Note 1). La colonne
+    Redondance du fichier n'est pas utilisée : elle compte le nombre de fois
+    où l'antenne a entendu le capteur, pas le nombre d'antennes. Avec une
+    seule antenne, la colonne Redondance est utilisée telle quelle.
 
     Retourne (liste (fichier, df) classée, df global des capteurs du contrat).
     """
