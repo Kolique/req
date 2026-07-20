@@ -7,12 +7,11 @@ Pour chaque fichier (traité séparément) :
      Aucune trame n'est écartée sur le SF : il ne sert qu'au niveau de pertinence.
   2. Classification de chaque capteur selon sa pertinence :
        - Indispensable   : Redondance = 1 ET SF = 7
-       - Pertinence +++  : Redondance = 2 et SF dans {7, 8, 9}
-       - Pertinence ++   : Redondance = 2 et SF > 9
+       - Pertinence +++  : Redondance = 1 et SF 8 ou 9, ou Redondance = 2 et SF 7 à 9
+       - Pertinence ++   : Redondance = 1 ou 2 avec SF > 9
        - Pertinence +    : Redondance 3 ou 4 (le SF n'est pas pris en compte)
-       - Non pertinent   : Redondance > 5
-       - À définir       : tout ce qui ne rentre dans aucune règle
-                           (ex. Redondance 1 avec SF != 7, ou Redondance 5)
+       - Non pertinent   : Redondance 5 et plus
+       - À définir       : tout ce qui ne rentre dans aucune règle (ex. SF < 7)
 Dès que plusieurs fichiers sont traités ensemble (les antennes d'un même
 contrat), la pertinence est calculée par recoupement entre antennes :
 1 fichier = 1 antenne, et pour chaque DevEUI de chaque antenne on cherche
@@ -107,17 +106,22 @@ def classer(redondance, sf) -> str:
     redondance = nombre d'antennes du contrat qui entendent le capteur
     (ou la colonne Redondance du fichier s'il n'y a qu'un seul fichier).
     """
-    if redondance > 5:
+    if redondance >= 5:
         return "Non pertinent"
-    if redondance == 1 and sf == 7:
-        return "Indispensable"
+    if redondance == 1:
+        if sf == 7:
+            return "Indispensable"
+        if sf in (8, 9):
+            return "Pertinence +++"
+        if sf > 9:
+            return "Pertinence ++"
     if redondance == 2 and sf in (7, 8, 9):
         return "Pertinence +++"
     if redondance == 2 and sf > 9:
         return "Pertinence ++"
     if redondance in (3, 4):
         return "Pertinence +"
-    return "À définir"  # ex. redondance 1 avec SF != 7, ou redondance 5
+    return "À définir"  # ex. SF hors norme (< 7)
 
 
 def analyser_fichier(chemin: Path) -> pd.DataFrame:
