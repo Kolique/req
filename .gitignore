@@ -4,3 +4,4 @@
 *-suivi.xlsx
 *-historique-*.csv
 Résultat/
+__pycache__/
