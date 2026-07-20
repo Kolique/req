@@ -46,10 +46,15 @@ sous-dossier Annexe/ avec les fichiers Excel des antennes (à défaut, les .xlsx
 (rapports, analyse globale, suivi, historiques) vont dans le sous-dossier
 Résultat/ du contrat, créé si besoin.
 
+Le script ne prend QUE les fichiers du dossier où il est lancé (ou des
+dossiers passés en argument). Il ne descend jamais dans les sous-dossiers,
+sauf avec l'option --tous.
+
 Utilisation :
-    python3 analyse_pertinence.py              # traite tous les contrats du dossier courant
-    python3 analyse_pertinence.py 863/         # traite un contrat précis
-    python3 analyse_pertinence.py 863/ 455/    # traite plusieurs contrats
+    python3 analyse_pertinence.py              # le dossier courant uniquement
+    python3 analyse_pertinence.py 863/         # un contrat précis
+    python3 analyse_pertinence.py 863/ 455/    # plusieurs contrats
+    python3 analyse_pertinence.py --tous       # tous les contrats (sous-dossiers)
     python3 analyse_pertinence.py a.xlsx b.xlsx  # fichiers passés directement
 """
 
@@ -576,13 +581,15 @@ def traiter_contrat(nom: str, fichiers: list, dossier: Path) -> None:
 
 def main() -> None:
     args = sys.argv[1:]
-    cibles = [Path(a) for a in args] if args else [Path(".")]
+    cibles = [Path(a) for a in args if not a.startswith("--")]
 
-    # Découverte des contrats à traiter :
-    #  - les sous-dossiers contenant des .xlsx (directement ou dans Annexe/)
-    #    sont les contrats ; les .xlsx isolés à la racine sont alors ignorés
-    #  - sinon, le dossier lui-même est un contrat s'il contient des .xlsx
-    #  - des fichiers .xlsx passés directement = un contrat ad hoc
+    # Par défaut, seul le dossier courant est traité (ses .xlsx, ou son
+    # sous-dossier Annexe/). Le script ne descend JAMAIS dans les autres
+    # sous-dossiers, sauf si --tous est passé : chaque sous-dossier
+    # contenant des .xlsx est alors traité comme un contrat.
+    tous = "--tous" in [a.lower() for a in args]
+    cibles = [c for c in cibles if str(c).lower() != "--tous"] or [Path(".")]
+
     dossiers_reserves = ("annexe", "annexes", "résultat", "resultat", "résultats", "resultats")
     contrats: list = []
     fichiers_directs: list = []
@@ -590,18 +597,13 @@ def main() -> None:
         if cible.is_file():
             fichiers_directs.append(cible)
         elif cible.is_dir():
-            sous_contrats = []
-            for sous in sorted(cible.iterdir()):
-                if (sous.is_dir() and not sous.name.startswith((".", "_"))
-                        and sous.name.lower() not in dossiers_reserves):
-                    xlsx = fichiers_du_contrat(sous)
-                    if xlsx:
-                        sous_contrats.append((sous.name, xlsx, sous))
-            if sous_contrats:
-                contrats.extend(sous_contrats)
-                if filtrer_sorties(cible.glob("*.xlsx")):
-                    print(f"Info : .xlsx à la racine de {cible.resolve().name} ignorés "
-                          f"(les contrats sont les sous-dossiers)")
+            if tous:
+                for sous in sorted(cible.iterdir()):
+                    if (sous.is_dir() and not sous.name.startswith((".", "_"))
+                            and sous.name.lower() not in dossiers_reserves):
+                        xlsx = fichiers_du_contrat(sous)
+                        if xlsx:
+                            contrats.append((sous.name, xlsx, sous))
             else:
                 xlsx = fichiers_du_contrat(cible)
                 if xlsx:
