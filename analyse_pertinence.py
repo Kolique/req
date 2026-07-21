@@ -264,8 +264,47 @@ def feuille_statistiques(wb, df: pd.DataFrame) -> None:
         ws.column_dimensions[col].width = largeur
 
 
-def exporter_resultats(df: pd.DataFrame, meta: dict, sortie: Path) -> None:
-    """Écrit le fichier Excel de résultats : synthèse, statistiques et détail."""
+def feuille_par_antenne(wb, antennes: list) -> None:
+    """Feuille "Par antenne" : une ligne par antenne analysée, avec le nombre
+    de capteurs de chaque niveau de pertinence, et un graphique en barres
+    empilées (une barre par antenne, une couleur par niveau).
+    """
+    ws = wb.create_sheet("Par antenne", 1)  # juste après la Synthèse
+    ws["A1"] = "Niveaux de pertinence par antenne"
+    ws["A1"].font = TITRE
+
+    table = pd.DataFrame([
+        {"Antenne": fichier.stem, "Capteurs": len(df), **compter_pertinences(df)}
+        for fichier, df in antennes
+    ])
+    ecrire_tableau(ws, 3, f"{len(antennes)} antenne(s) analysée(s)", table)
+
+    bar = BarChart()
+    bar.type = "col"
+    bar.grouping = "stacked"
+    bar.overlap = 100
+    bar.title = "Répartition des pertinences par antenne"
+    # Lignes : 3 = titre, 4 = en-têtes, 5.. = données ; colonnes C.. = catégories
+    data = Reference(ws, min_col=3, max_col=2 + len(CATEGORIES), min_row=4, max_row=4 + len(table))
+    labels = Reference(ws, min_col=1, min_row=5, max_row=4 + len(table))
+    bar.add_data(data, titles_from_data=True)
+    bar.set_categories(labels)
+    for i, cat in enumerate(CATEGORIES):
+        bar.series[i].graphicalProperties.solidFill = COULEURS[cat]
+    bar.height, bar.width = 10, 20
+    ws.add_chart(bar, f"A{7 + len(table)}")
+
+    ws.column_dimensions["A"].width = 24
+    for col in "BCDEFGH":
+        ws.column_dimensions[col].width = 15
+
+
+def exporter_resultats(df: pd.DataFrame, meta: dict, sortie: Path, antennes: list = None) -> None:
+    """Écrit le fichier Excel de résultats : synthèse, statistiques et détail.
+
+    Si `antennes` est fourni ([(fichier, df classé), ...]), une feuille
+    "Par antenne" est ajoutée avec les niveaux de pertinence par antenne.
+    """
     with pd.ExcelWriter(sortie, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="Tous les capteurs", index=False)
         for cat in CATEGORIES:
@@ -274,6 +313,8 @@ def exporter_resultats(df: pd.DataFrame, meta: dict, sortie: Path) -> None:
                 sous_df.to_excel(writer, sheet_name=NOMS_FEUILLE[cat], index=False)
 
         feuille_synthese(writer.book, df, meta)
+        if antennes:
+            feuille_par_antenne(writer.book, antennes)
         feuille_statistiques(writer.book, df)
 
     print(f"  Résultats écrits dans : {sortie}")
@@ -332,7 +373,7 @@ def exporter_globale(resultats: list, dossier_sortie: Path, nom_contrat: str) ->
 
     sortie = dossier_sortie / f"{nom_contrat}-analyse-globale{suffixe}.xlsx"
     print(f"\nAnalyse globale du contrat '{nom_contrat}' ({len(resultats)} antennes)")
-    exporter_resultats(capteurs, meta, sortie)
+    exporter_resultats(capteurs, meta, sortie, antennes=resultats)
     return capteurs
 
 
