@@ -46,12 +46,12 @@ sous-dossier Annexe/ avec les fichiers Excel des antennes (à défaut, les .xlsx
 (rapports, analyse globale, suivi, historiques) vont dans le sous-dossier
 Résultat/ du contrat, créé si besoin.
 
-Le script ne prend QUE les fichiers du dossier où il est lancé (ou des
-dossiers passés en argument). Il ne descend jamais dans les sous-dossiers,
-sauf avec l'option --tous.
+Le script ne prend QUE les fichiers du dossier où se trouve le .py (ou des
+dossiers passés en argument), quel que soit l'endroit d'où on le lance.
+Il ne descend jamais dans les sous-dossiers, sauf avec l'option --tous.
 
 Utilisation :
-    python3 analyse_pertinence.py              # le dossier courant uniquement
+    python3 analyse_pertinence.py              # le dossier du script uniquement
     python3 analyse_pertinence.py 863/         # un contrat précis
     python3 analyse_pertinence.py 863/ 455/    # plusieurs contrats
     python3 analyse_pertinence.py --tous       # tous les contrats (sous-dossiers)
@@ -624,12 +624,13 @@ def main() -> None:
     args = sys.argv[1:]
     cibles = [Path(a) for a in args if not a.startswith("--")]
 
-    # Par défaut, seul le dossier courant est traité (ses .xlsx, ou son
-    # sous-dossier Annexe/). Le script ne descend JAMAIS dans les autres
-    # sous-dossiers, sauf si --tous est passé : chaque sous-dossier
-    # contenant des .xlsx est alors traité comme un contrat.
+    # Par défaut, seul le dossier où se trouve ce script est traité (ses
+    # .xlsx, ou son sous-dossier Annexe/), quel que soit l'endroit d'où on
+    # le lance. Le script ne descend JAMAIS dans les autres sous-dossiers,
+    # sauf si --tous est passé : chaque sous-dossier contenant des .xlsx
+    # est alors traité comme un contrat.
     tous = "--tous" in [a.lower() for a in args]
-    cibles = [c for c in cibles if str(c).lower() != "--tous"] or [Path(".")]
+    cibles = [c for c in cibles if str(c).lower() != "--tous"] or [Path(__file__).resolve().parent]
 
     dossiers_reserves = ("annexe", "annexes", "résultat", "resultat", "résultats", "resultats")
     contrats: list = []
@@ -660,6 +661,13 @@ def main() -> None:
 
     if not contrats:
         print("Aucun fichier .xlsx à traiter.")
+        for c in cibles:
+            if c.is_dir():
+                print(f"  Dossier inspecté : {c.resolve()} (et son sous-dossier Annexe s'il existe)")
+        print("Astuces :")
+        print("  - placez ce script dans le dossier du contrat (à côté d'Annexe/)")
+        print("  - ou passez un dossier en argument : python analyse_pertinence.py 863")
+        print("  - ou utilisez --tous pour traiter tous les sous-dossiers de contrats")
         sys.exit(1)
 
     for nom, fichiers, dossier in contrats:
